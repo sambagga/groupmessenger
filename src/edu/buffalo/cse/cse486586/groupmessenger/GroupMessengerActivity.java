@@ -7,10 +7,15 @@ import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.UnknownHostException;
-
+import java.util.HashMap;
+import java.util.StringTokenizer;
 
 import android.app.Activity;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
+import android.database.Cursor;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.telephony.TelephonyManager;
@@ -22,11 +27,16 @@ import android.widget.EditText;
 import android.widget.TextView;
 
 public class GroupMessengerActivity extends Activity {
+	private static final String KEY_FIELD = "key";
+	private static final String VALUE_FIELD = "value";
 	EditText editText;
 	TextView tv;
-	Integer[] destPort = new Integer[2]; // port of avd
-	String recvMsg;
+	Integer[] destPort = new Integer[3]; // port of avd
 	Handler handle = new Handler(); // to append text to textview in threads
+	int localSeq = 0, expSeqno = 0, seqPort = 5554;
+	String msgID, selfPort;
+	Uri uri;
+	ContentResolver conRes;
 
 	@Override
 	protected void onCreate(Bundle savedInstanceState) {
@@ -35,22 +45,11 @@ public class GroupMessengerActivity extends Activity {
 		editText = (EditText) findViewById(R.id.editText1);
 		tv = (TextView) findViewById(R.id.textView1);
 		tv.setMovementMethod(new ScrollingMovementMethod());
-
+		uri = buildUri("content",
+				"edu.buffalo.cse.cse486586.groupmessenger.provider");
+		conRes = getContentResolver();
 		// detect port of other avd to connect to, reference specs document
-		TelephonyManager tel = (TelephonyManager) getBaseContext()
-				.getSystemService(Context.TELEPHONY_SERVICE);
-		String portStr = tel.getLine1Number().substring(
-				tel.getLine1Number().length() - 4);
-		if (portStr.equals("5554")) {
-			destPort[0] = 11112;
-			destPort[1] = 11116;
-		} else if (portStr.equals("5556")) {
-			destPort[0] = 11108;
-			destPort[1] = 11116;
-		} else if (portStr.equals("5558")) {
-			destPort[0] = 11108;
-			destPort[1] = 11112;
-		}
+		selfPort = getAVD();
 
 		findViewById(R.id.button1).setOnClickListener(
 				new OnPTestClickListener(tv, getContentResolver()));
@@ -67,45 +66,86 @@ public class GroupMessengerActivity extends Activity {
 		return true;
 	}
 
+	// reference PTest case
+	private Uri buildUri(String scheme, String authority) {
+		Uri.Builder uriBuilder = new Uri.Builder();
+		uriBuilder.authority(authority);
+		uriBuilder.scheme(scheme);
+		return uriBuilder.build();
+	}
+
+	// to identify AVD executing the app
+	public String getAVD() {
+		TelephonyManager tel = (TelephonyManager) getBaseContext()
+				.getSystemService(Context.TELEPHONY_SERVICE);
+		String portStr = tel.getLine1Number().substring(
+				tel.getLine1Number().length() - 4);
+		return portStr;
+	}
+
 	// get the message from EditText and send
 	public void sendMessage(View view) {
 		String message = editText.getText().toString();
 		if (message != null && !message.isEmpty() && !message.trim().isEmpty()) {
-			tv.append("Me:" + message + "\n");
 			// initiate client thread
-			for (int i = 0; i < 2; i++) {
-				Log.i("Initiate client ","thread");
-				Thread cl = new forClient(message, destPort[i]);
-				cl.start();
-				editText.setText("");
-			}
+			msgID = selfPort.concat("" + localSeq);
+			Log.i("Initiate client ", "thread");
+			Thread cl = new forClient(message, msgID, 1);
+			cl.start();
+			localSeq++;
+			editText.setText("");
 		}
+	}
+
+	// store in content provider
+	public void storeCP(String recvMsg) {
+		ContentValues cv = new ContentValues();
+		cv.put(KEY_FIELD, Integer.toString(expSeqno));
+		cv.put(VALUE_FIELD, recvMsg);
+		conRes.insert(uri, cv);
 	}
 
 	// client thread
 	class forClient extends Thread {
-		String message;
-		Integer destPort;
+		String message, id;
+		int type;
 
-		forClient(String msg, Integer port) {
+		forClient(String msg, String msgID, int msgType) {
 			message = msg;
-			destPort = port;
+			id = msgID;
+			type = msgType;
 		}
 
 		public void run() {
 			Socket clSock;
 			try {
 				Log.i("Client Thread", message);
-				// connect to server
-				clSock = new Socket("10.0.2.2", destPort);
-				Log.i("Sending Message=", message);
-				// send the message to server
-				PrintWriter sendData = new PrintWriter(clSock.getOutputStream());
-				sendData.println(message);
-				sendData.flush();
-				sendData.close();
-				Log.i("Message sent=", message);
-
+				for (int port = 11108; port <= 11116; port += 4) {
+					// connect to server
+					clSock = new Socket("10.0.2.2", port);
+					Log.i("Sending Message type" + type + "=", message);
+					// send the message to server
+					PrintWriter sendData = new PrintWriter(
+							clSock.getOutputStream());
+					if (type == 1)
+						sendData.println("%" + id + ":" + message);
+					if (type == 2)
+						sendData.println("$" + id + ":" + message);
+					sendData.flush();
+					sendData.close();
+					Log.i("Message sent=", message);
+				}
+				if (type == 1) {
+					clSock = new Socket("10.0.2.2", 11108);
+					Log.i("Sending Message to sequencer=", id);
+					// send the message to sequencer
+					PrintWriter sendData = new PrintWriter(
+							clSock.getOutputStream());
+					sendData.println("#" + id);
+					sendData.flush();
+					sendData.close();
+					Log.i("Message sent to sequencer=", id);
+				}
 			} catch (NumberFormatException e) {
 				// TODO Auto-generated catch block
 				handle.post(new Runnable() {
@@ -144,8 +184,17 @@ public class GroupMessengerActivity extends Activity {
 
 	// server thread
 	class forServer extends Thread {
+		HashMap<String, String> seqBuffer = new HashMap<String, String>();
+		HashMap<String, String> holdBack = new HashMap<String, String>();
+		int seqNo = 0;
+
 		public void run() {
 			try {
+				// start tracker
+				Log.i("Initiate tracker ", "thread");
+				Thread track = new tracker();
+				track.start();
+
 				// open connection on port 10000
 				ServerSocket serSock = new ServerSocket(10000);
 				Log.d("Starting Server", "Forserver");
@@ -158,14 +207,20 @@ public class GroupMessengerActivity extends Activity {
 							recvSock.getInputStream());
 					BufferedReader recvInp = new BufferedReader(readStream);
 					Log.i("Reader", "Initialized");
-					recvMsg = recvInp.readLine();
-					Log.i("Received Message=", recvMsg);
-					// display text in TextView widget
-					handle.post(new Runnable() {
-						public void run() {
-							tv.append("From:" + recvMsg + "\n");
-						}
-					});
+					String recvMsg = recvInp.readLine();
+					Log.i("Received Message:", recvMsg);
+					// recognise message type
+					switch (recvMsg.charAt(0)) {
+					case '%':
+						holdbackQue(recvMsg.substring(1));
+						break;
+					case '$':
+						storeSeq(recvMsg.substring(1));
+						break;
+					case '#':
+						sequencer(recvMsg.substring(1));
+						break;
+					}
 					recvSock.close();
 				}
 			} catch (IOException e) {
@@ -179,5 +234,54 @@ public class GroupMessengerActivity extends Activity {
 			}
 
 		}
-	}
-}
+		
+		//hold back queue
+		public void holdbackQue(String msg) {
+			StringTokenizer sTok = new StringTokenizer(msg, ":");
+			String msgID = sTok.nextToken();
+			String value = sTok.nextToken();
+			Log.i("Hold Back","Queue "+msgID+" "+value);
+			holdBack.put(msgID, value);
+		}
+		
+		//Make buffer for sequence no and message_id
+		public void storeSeq(String msg) {
+			StringTokenizer sTok = new StringTokenizer(msg, ":");
+			String msgID = sTok.nextToken();
+			String seqNo = sTok.nextToken();
+			Log.i("Store","Sequence "+msgID+" "+seqNo);
+			seqBuffer.put(seqNo, msgID);
+		}
+		
+		//sequencer algorithm
+		public void sequencer(String msgID) {
+			Log.i("Initiate", "sequencer " + msgID);
+			Thread cl = new forClient("" + seqNo, msgID, 2);
+			cl.start();
+			seqNo++;
+		}
+
+		// tracker thread
+		class tracker extends Thread {
+			public void run() {
+				Log.i("Running","Tracker");
+				while (true) {
+					//Log.i("Buffer:"+seqBuffer,"Expected sequence no:"+expSeqno);
+					if (seqBuffer.get(""+expSeqno)!=null) {
+						Log.i("Tracker Thread","Match "+expSeqno);
+						final String seq = ""+expSeqno;
+						final String msgID = seqBuffer.get(""+expSeqno);
+						final String value = holdBack.get(msgID);
+						handle.post(new Runnable() {
+							public void run() {
+								tv.append(seq + "." + msgID + ":" + value + "\n");
+							}
+						});
+						storeCP(value);
+						expSeqno++;
+					}
+				}
+			}
+		}// end of tracker thread
+	}// end of forServer thread
+}// end of GroupMessengerActivity class
