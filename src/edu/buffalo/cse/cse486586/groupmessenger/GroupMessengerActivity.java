@@ -33,8 +33,8 @@ public class GroupMessengerActivity extends Activity {
 	TextView tv;
 	Integer[] destPort = new Integer[3]; // port of avd
 	Handler handle = new Handler(); // to append text to textview in threads
-	int localSeq = 0, expSeqno = 0, seqPort = 5554;
-	String msgID, selfPort;
+	static int explocalSeq = 0, localSeq = 0, expSeqno = 0, seqPort = 5554;
+	String selfPort, avd;
 	Uri uri;
 	ContentResolver conRes;
 
@@ -50,7 +50,12 @@ public class GroupMessengerActivity extends Activity {
 		conRes = getContentResolver();
 		// detect port of other avd to connect to, reference specs document
 		selfPort = getAVD();
-
+		if (selfPort.equals("5554"))
+			avd = "avd0";
+		else if (selfPort.equals("5556"))
+			avd = "avd1";
+		else
+			avd = "avd2";
 		findViewById(R.id.button1).setOnClickListener(
 				new OnPTestClickListener(tv, getContentResolver()));
 
@@ -88,13 +93,37 @@ public class GroupMessengerActivity extends Activity {
 		String message = editText.getText().toString();
 		if (message != null && !message.isEmpty() && !message.trim().isEmpty()) {
 			// initiate client thread
-			msgID = selfPort.concat("" + localSeq);
+			while(explocalSeq!=localSeq){}
+			String msgID = selfPort.concat("" + localSeq);
 			Log.i("Initiate client ", "thread");
 			Thread cl = new forClient(message, msgID, 1);
 			cl.start();
-			localSeq++;
+			explocalSeq++;
 			editText.setText("");
 		}
+	}
+
+	// test case 1
+	public void test1(View view) {
+		Log.i("Test Case 1", "Initiated");
+		Thread test1 = new testCase1();
+		test1.start();
+	}
+
+	// test case 2
+	public void test2(View view) {
+		Log.i("Test Case 2", "Initiated");
+		Log.i("AVD:", avd);
+		while(explocalSeq!=localSeq){}
+		String msg = avd + ":" + localSeq;
+		String msgID = selfPort.concat("" + localSeq);
+		
+		Log.i("Test Case 2 Message:", msg);
+		// multicast the message
+		Thread cl = new forClient(msg, msgID, 3);
+		cl.start();
+		explocalSeq++;
+		Log.i("Test Case 2 Message", "Sent");
 	}
 
 	// store in content provider
@@ -128,14 +157,16 @@ public class GroupMessengerActivity extends Activity {
 					PrintWriter sendData = new PrintWriter(
 							clSock.getOutputStream());
 					if (type == 1)
-						sendData.println("%" + id + ":" + message);
+						sendData.println("%" + id + ";" + message);
 					if (type == 2)
-						sendData.println("$" + id + ":" + message);
+						sendData.println("$" + id + ";" + message);
+					if (type == 3)
+						sendData.println("@" + id + ";" + message);
 					sendData.flush();
 					sendData.close();
 					Log.i("Message sent=", message);
 				}
-				if (type == 1) {
+				if (type == 1 || type == 3) {
 					clSock = new Socket("10.0.2.2", 11108);
 					Log.i("Sending Message to sequencer=", id);
 					// send the message to sequencer
@@ -144,8 +175,10 @@ public class GroupMessengerActivity extends Activity {
 					sendData.println("#" + id);
 					sendData.flush();
 					sendData.close();
+					localSeq++;
 					Log.i("Message sent to sequencer=", id);
 				}
+				
 			} catch (NumberFormatException e) {
 				// TODO Auto-generated catch block
 				handle.post(new Runnable() {
@@ -182,11 +215,38 @@ public class GroupMessengerActivity extends Activity {
 		}
 	}
 
+	// test case 1
+	class testCase1 extends Thread {
+		public void run() {
+			Log.i("AVD:", avd);
+			for (int i = 0; i < 5; i++) {
+				while(explocalSeq!=localSeq){}
+				String msg = avd + ":" + localSeq;
+				String msgID = selfPort.concat("" + localSeq);
+				Log.i("Test Case 1 Message:", msg);
+				// multicast the message
+				Thread cl = new forClient(msg, msgID, 1);
+				cl.start();
+				explocalSeq++;
+				Log.i("Test Case 1 Message", "Sent");
+				// sleep for 3 secs
+				try {
+					Thread.sleep(3000);
+					Log.i("Sleep", "Over");
+				} catch (InterruptedException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+			}
+		}
+	}
+
 	// server thread
 	class forServer extends Thread {
 		HashMap<String, String> seqBuffer = new HashMap<String, String>();
 		HashMap<String, String> holdBack = new HashMap<String, String>();
 		int seqNo = 0;
+		int test = 0;
 
 		public void run() {
 			try {
@@ -217,6 +277,10 @@ public class GroupMessengerActivity extends Activity {
 					case '$':
 						storeSeq(recvMsg.substring(1));
 						break;
+					case '@':
+						holdbackQue(recvMsg.substring(1));
+						test = 1;
+						break;
 					case '#':
 						sequencer(recvMsg.substring(1));
 						break;
@@ -234,26 +298,26 @@ public class GroupMessengerActivity extends Activity {
 			}
 
 		}
-		
-		//hold back queue
+
+		// hold back queue
 		public void holdbackQue(String msg) {
-			StringTokenizer sTok = new StringTokenizer(msg, ":");
+			StringTokenizer sTok = new StringTokenizer(msg, ";");
 			String msgID = sTok.nextToken();
 			String value = sTok.nextToken();
-			Log.i("Hold Back","Queue "+msgID+" "+value);
+			Log.i("Hold Back", "Queue " + msgID + " " + value);
 			holdBack.put(msgID, value);
 		}
-		
-		//Make buffer for sequence no and message_id
+
+		// Make buffer for sequence no and message_id
 		public void storeSeq(String msg) {
-			StringTokenizer sTok = new StringTokenizer(msg, ":");
+			StringTokenizer sTok = new StringTokenizer(msg, ";");
 			String msgID = sTok.nextToken();
 			String seqNo = sTok.nextToken();
-			Log.i("Store","Sequence "+msgID+" "+seqNo);
+			Log.i("Store", "Sequence " + msgID + " " + seqNo);
 			seqBuffer.put(seqNo, msgID);
 		}
-		
-		//sequencer algorithm
+
+		// sequencer algorithm
 		public void sequencer(String msgID) {
 			Log.i("Initiate", "sequencer " + msgID);
 			Thread cl = new forClient("" + seqNo, msgID, 2);
@@ -261,24 +325,47 @@ public class GroupMessengerActivity extends Activity {
 			seqNo++;
 		}
 
+		// test case 2, multicast 3 messages
+		public void send3msg() {
+			Log.i("AVD:", avd);
+			for (int i = 0; i < 2; i++) {
+				while(explocalSeq!=localSeq){}
+				String msg = avd + ":" + localSeq;
+				String msgID = selfPort.concat("" + localSeq);
+				Log.i("Test Case 2 Message:", msg);
+				// multicast the message
+				Thread cl = new forClient(msg, msgID, 1);
+				cl.start();
+				explocalSeq++;
+				Log.i("Test Case 2 Message", "Sent");
+			}
+		}
+
 		// tracker thread
 		class tracker extends Thread {
 			public void run() {
-				Log.i("Running","Tracker");
+				Log.i("Running", "Tracker");
 				while (true) {
-					//Log.i("Buffer:"+seqBuffer,"Expected sequence no:"+expSeqno);
-					if (seqBuffer.get(""+expSeqno)!=null) {
-						Log.i("Tracker Thread","Match "+expSeqno);
-						final String seq = ""+expSeqno;
-						final String msgID = seqBuffer.get(""+expSeqno);
+					// Log.i("Buffer:"+seqBuffer,"Expected sequence no:"+expSeqno);
+					if (seqBuffer.get("" + expSeqno) != null) {
+						Log.i("Tracker Thread", "Match " + expSeqno);
+						final String seq = "" + expSeqno;
+						final String msgID = seqBuffer.get("" + expSeqno);
 						final String value = holdBack.get(msgID);
-						handle.post(new Runnable() {
-							public void run() {
-								tv.append(seq + "." + msgID + ":" + value + "\n");
+						if (value != null) {
+							handle.post(new Runnable() {
+								public void run() {
+									tv.append(seq + "." + msgID + ":" + value
+											+ "\n");
+								}
+							});
+							storeCP(value);
+							expSeqno++;
+							if (test == 1) {
+								send3msg();
+								test = 0;
 							}
-						});
-						storeCP(value);
-						expSeqno++;
+						}
 					}
 				}
 			}
